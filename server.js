@@ -132,8 +132,115 @@ async function requestCustomerDataErasure(customerId) {
   return payload;
 }
 
+app.get("/", (_req, res) => {
+  res.status(200).send("WeBuyOne delete account backend is live.");
+});
+
 app.get("/health", (_req, res) => {
   res.json({ ok: true, service: "webuyone-delete-backend" });
+});
+
+app.get("/account/delete", (_req, res) => {
+  res.status(200).send(`
+    <!doctype html>
+    <html lang="en">
+      <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width,initial-scale=1" />
+        <title>WeBuyOne - Account Deletion</title>
+        <style>
+          body {
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #f6f6f6;
+            color: #111;
+          }
+          .wrap {
+            max-width: 760px;
+            margin: 0 auto;
+            padding: 40px 20px;
+          }
+          .card {
+            background: #fff;
+            border-radius: 20px;
+            padding: 28px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.06);
+          }
+          h1 {
+            margin: 0 0 12px;
+            font-size: 28px;
+            line-height: 1.2;
+          }
+          p {
+            margin: 0 0 14px;
+            font-size: 16px;
+            line-height: 1.7;
+            color: #444;
+          }
+          ol {
+            margin: 12px 0 18px;
+            padding-left: 22px;
+            color: #444;
+            line-height: 1.8;
+          }
+          .note {
+            margin-top: 18px;
+            padding: 14px 16px;
+            border-radius: 12px;
+            background: #fff4f4;
+            color: #8e1f1f;
+            font-size: 15px;
+            line-height: 1.7;
+          }
+          .box {
+            margin-top: 18px;
+            padding: 14px 16px;
+            border-radius: 12px;
+            background: #f3f4f6;
+            color: #222;
+            font-size: 14px;
+            line-height: 1.7;
+            word-break: break-word;
+          }
+          .small {
+            margin-top: 16px;
+            font-size: 14px;
+            color: #666;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="wrap">
+          <div class="card">
+            <h1>Delete Your WeBuyOne Account</h1>
+            <p>
+              WeBuyOne allows users to initiate account deletion directly inside the mobile app.
+            </p>
+            <p>
+              To request deletion of your account, open the app and go to:
+            </p>
+            <ol>
+              <li>Account</li>
+              <li>Settings</li>
+              <li>Delete Account</li>
+              <li>Confirm deletion</li>
+            </ol>
+            <div class="note">
+              If the account has no order history, it may be deleted immediately.
+              If the account has order history, a customer data erasure request is submitted for processing.
+            </div>
+            <div class="box">
+              Backend endpoint used by the app: POST /account/delete
+            </div>
+            <p class="small">
+              This page is provided for review and informational purposes.
+            </p>
+          </div>
+        </div>
+      </body>
+    </html>
+  `);
 });
 
 app.post("/account/delete", async (req, res) => {
@@ -185,6 +292,8 @@ app.post("/account/delete", async (req, res) => {
     });
   }
 });
+
+ensureEnv();
 
 app.listen(PORT, () => {
   console.log(`Delete account backend running on http://localhost:${PORT}`);
