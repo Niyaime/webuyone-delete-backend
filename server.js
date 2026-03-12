@@ -2,6 +2,8 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import fetch from "node-fetch";
+import fs from "fs";
+import path from "path";
 
 dotenv.config();
 
@@ -14,11 +16,92 @@ const ADMIN_API_VERSION = process.env.SHOPIFY_ADMIN_API_VERSION || "2026-01";
 const ADMIN_ACCESS_TOKEN = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN;
 const PORT = Number(process.env.PORT || 3001);
 
+const DATA_DIR = path.resolve("./data");
+const NOTIFICATIONS_FILE = path.join(DATA_DIR, "notifications.json");
+const PREFERENCES_FILE = path.join(DATA_DIR, "notification-preferences.json");
+
 function ensureEnv() {
   if (!SHOPIFY_STORE) throw new Error("Missing SHOPIFY_STORE in .env");
   if (!ADMIN_ACCESS_TOKEN) {
     throw new Error("Missing SHOPIFY_ADMIN_ACCESS_TOKEN in .env");
   }
+}
+
+function ensureDataFiles() {
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  }
+
+  if (!fs.existsSync(NOTIFICATIONS_FILE)) {
+    fs.writeFileSync(NOTIFICATIONS_FILE, JSON.stringify({}, null, 2), "utf8");
+  }
+
+  if (!fs.existsSync(PREFERENCES_FILE)) {
+    fs.writeFileSync(PREFERENCES_FILE, JSON.stringify({}, null, 2), "utf8");
+  }
+}
+
+function readJsonFile(filePath) {
+  try {
+    const raw = fs.readFileSync(filePath, "utf8");
+    return JSON.parse(raw || "{}");
+  } catch {
+    return {};
+  }
+}
+
+function writeJsonFile(filePath, value) {
+  fs.writeFileSync(filePath, JSON.stringify(value, null, 2), "utf8");
+}
+
+function normalizeEmail(email) {
+  return String(email || "").trim().toLowerCase();
+}
+
+function getDefaultPreferences(email = "") {
+  return {
+    email,
+    expoPushToken: "",
+    pushEnabled: true,
+    promoEnabled: true,
+    orderEnabled: true,
+    stockEnabled: true,
+    priceEnabled: true,
+    updatedAt: new Date().toISOString()
+  };
+}
+
+function getSeedNotifications(email) {
+  const now = new Date();
+  return [
+    {
+      id: `${email}-1`,
+      type: "promo",
+      title: "Special deals are live",
+      message: "Check today’s top offers and limited-time discounts on WeBuyOne.",
+      time: "Just now",
+      unread: true,
+      createdAt: now.toISOString()
+    },
+    {
+      id: `${email}-2`,
+      type: "order",
+      title: "Order updates will appear here",
+      message: "When you place an order, shipping and delivery updates will be shown here.",
+      time: "Today",
+      unread: false,
+      createdAt: now.toISOString()
+    },
+    {
+      id: `${email}-3`,
+      type: "stock",
+      title: "Back in stock alerts",
+      message: "Products you follow can appear here when inventory is available again.",
+      time: "Today",
+      unread: false,
+      createdAt: now.toISOString()
+    }
+  ];
 }
 
 async function shopifyAdminRequest(query, variables = {}) {
@@ -133,7 +216,7 @@ async function requestCustomerDataErasure(customerId) {
 }
 
 app.get("/", (_req, res) => {
-  res.status(200).send("WeBuyOne delete account backend is live.");
+  res.status(200).send("WeBuyOne backend is live.");
 });
 
 app.get("/health", (_req, res) => {
@@ -203,23 +286,14 @@ app.get("/account/delete", (_req, res) => {
             line-height: 1.7;
             word-break: break-word;
           }
-          .small {
-            margin-top: 16px;
-            font-size: 14px;
-            color: #666;
-          }
         </style>
       </head>
       <body>
         <div class="wrap">
           <div class="card">
             <h1>Delete Your WeBuyOne Account</h1>
-            <p>
-              WeBuyOne allows users to initiate account deletion directly inside the mobile app.
-            </p>
-            <p>
-              To request deletion of your account, open the app and go to:
-            </p>
+            <p>WeBuyOne allows users to initiate account deletion directly inside the mobile app.</p>
+            <p>To request deletion of your account, open the app and go to:</p>
             <ol>
               <li>Account</li>
               <li>Settings</li>
@@ -230,12 +304,7 @@ app.get("/account/delete", (_req, res) => {
               If the account has no order history, it may be deleted immediately.
               If the account has order history, a customer data erasure request is submitted for processing.
             </div>
-            <div class="box">
-              Backend endpoint used by the app: POST /account/delete
-            </div>
-            <p class="small">
-              This page is provided for review and informational purposes.
-            </p>
+            <div class="box">Backend endpoint used by the app: POST /account/delete</div>
           </div>
         </div>
       </body>
@@ -247,7 +316,7 @@ app.post("/account/delete", async (req, res) => {
   try {
     ensureEnv();
 
-    const email = String(req.body?.email || "").trim().toLowerCase();
+    const email = normalizeEmail(req.body?.email);
 
     if (!email) {
       return res.status(400).json({
@@ -293,6 +362,193 @@ app.post("/account/delete", async (req, res) => {
   }
 });
 
+app.get("/notifications", (req, res) => {
+  try {
+    const email = normalizeEmail(req.query?.email);
+
+    if (!email) {
+      return res.status(400).json({
+        ok: false,
+        error: "Email is required."
+      });
+    }
+
+    const db = readJsonFile(NOTIFICATIONS_FILE);
+
+    if (!Array.isArray(db[email])) {
+      db[email] = getSeedNotifications(email);
+      writeJsonFile(NOTIFICATIONS_FILE, db);
+    }
+
+    return res.json({
+      ok: true,
+      notifications: db[email]
+    });
+  } catch (error) {
+    return res.status(500).json({
+      ok: false,
+      error: error?.message || "Unable to load notifications."
+    });
+  }
+});
+
+app.post("/notifications/mark-all-read", (req, res) => {
+  try {
+    const email = normalizeEmail(req.body?.email);
+
+    if (!email) {
+      return res.status(400).json({
+        ok: false,
+        error: "Email is required."
+      });
+    }
+
+    const db = readJsonFile(NOTIFICATIONS_FILE);
+    const current = Array.isArray(db[email]) ? db[email] : [];
+
+    db[email] = current.map((item) => ({
+      ...item,
+      unread: false
+    }));
+
+    writeJsonFile(NOTIFICATIONS_FILE, db);
+
+    return res.json({
+      ok: true
+    });
+  } catch (error) {
+    return res.status(500).json({
+      ok: false,
+      error: error?.message || "Unable to mark notifications as read."
+    });
+  }
+});
+
+app.post("/notifications/preferences", (req, res) => {
+  try {
+    const email = normalizeEmail(req.body?.email);
+
+    if (!email) {
+      return res.status(400).json({
+        ok: false,
+        error: "Email is required."
+      });
+    }
+
+    const prefsDb = readJsonFile(PREFERENCES_FILE);
+    const existing = prefsDb[email] || getDefaultPreferences(email);
+
+    prefsDb[email] = {
+      ...existing,
+      email,
+      expoPushToken: String(req.body?.expoPushToken || existing.expoPushToken || ""),
+      pushEnabled: Boolean(req.body?.pushEnabled),
+      promoEnabled: Boolean(req.body?.promoEnabled),
+      orderEnabled: Boolean(req.body?.orderEnabled),
+      stockEnabled: Boolean(req.body?.stockEnabled),
+      priceEnabled: Boolean(req.body?.priceEnabled),
+      updatedAt: new Date().toISOString()
+    };
+
+    writeJsonFile(PREFERENCES_FILE, prefsDb);
+
+    return res.json({
+      ok: true,
+      preferences: prefsDb[email]
+    });
+  } catch (error) {
+    return res.status(500).json({
+      ok: false,
+      error: error?.message || "Unable to save notification preferences."
+    });
+  }
+});
+
+app.get("/notifications/preferences", (req, res) => {
+  try {
+    const email = normalizeEmail(req.query?.email);
+
+    if (!email) {
+      return res.status(400).json({
+        ok: false,
+        error: "Email is required."
+      });
+    }
+
+    const prefsDb = readJsonFile(PREFERENCES_FILE);
+    const prefs = prefsDb[email] || getDefaultPreferences(email);
+
+    return res.json({
+      ok: true,
+      preferences: prefs
+    });
+  } catch (error) {
+    return res.status(500).json({
+      ok: false,
+      error: error?.message || "Unable to load notification preferences."
+    });
+  }
+});
+
+app.post("/notifications/send-test", async (req, res) => {
+  try {
+    const email = normalizeEmail(req.body?.email);
+
+    if (!email) {
+      return res.status(400).json({
+        ok: false,
+        error: "Email is required."
+      });
+    }
+
+    const prefsDb = readJsonFile(PREFERENCES_FILE);
+    const prefs = prefsDb[email];
+
+    if (!prefs?.expoPushToken) {
+      return res.status(400).json({
+        ok: false,
+        error: "No Expo push token found for this email."
+      });
+    }
+
+    if (!prefs.pushEnabled) {
+      return res.status(400).json({
+        ok: false,
+        error: "Push notifications are disabled for this user."
+      });
+    }
+
+    const expoRes = await fetch("https://exp.host/--/api/v2/push/send", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        to: prefs.expoPushToken,
+        sound: "default",
+        title: "WeBuyOne",
+        body: "This is a test push notification.",
+        data: {
+          type: "test"
+        }
+      })
+    });
+
+    const expoJson = await expoRes.json();
+
+    return res.json({
+      ok: true,
+      expo: expoJson
+    });
+  } catch (error) {
+    return res.status(500).json({
+      ok: false,
+      error: error?.message || "Unable to send test push notification."
+    });
+  }
+});
+
+ensureDataFiles();
 ensureEnv();
 
 app.listen(PORT, () => {
