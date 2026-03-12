@@ -19,6 +19,7 @@ const PORT = Number(process.env.PORT || 3001);
 const DATA_DIR = path.resolve("./data");
 const NOTIFICATIONS_FILE = path.join(DATA_DIR, "notifications.json");
 const PREFERENCES_FILE = path.join(DATA_DIR, "notification-preferences.json");
+const CARTS_FILE = path.join(DATA_DIR, "abandoned-carts.json");
 
 function ensureEnv() {
   if (!SHOPIFY_STORE) throw new Error("Missing SHOPIFY_STORE in .env");
@@ -38,6 +39,10 @@ function ensureDataFiles() {
 
   if (!fs.existsSync(PREFERENCES_FILE)) {
     fs.writeFileSync(PREFERENCES_FILE, JSON.stringify({}, null, 2), "utf8");
+  }
+
+  if (!fs.existsSync(CARTS_FILE)) {
+    fs.writeFileSync(CARTS_FILE, JSON.stringify({}, null, 2), "utf8");
   }
 }
 
@@ -67,41 +72,119 @@ function getDefaultPreferences(email = "") {
     orderEnabled: true,
     stockEnabled: true,
     priceEnabled: true,
+    cartEnabled: true,
     updatedAt: new Date().toISOString()
   };
 }
 
 function getSeedNotifications(email) {
-  const now = new Date();
+  const now = new Date().toISOString();
+
   return [
     {
-      id: `${email}-1`,
+      id: `${email}-promo-seed`,
       type: "promo",
       title: "Special deals are live",
       message: "Check today’s top offers and limited-time discounts on WeBuyOne.",
       time: "Just now",
       unread: true,
-      createdAt: now.toISOString()
+      createdAt: now
     },
     {
-      id: `${email}-2`,
+      id: `${email}-order-seed`,
       type: "order",
       title: "Order updates will appear here",
       message: "When you place an order, shipping and delivery updates will be shown here.",
       time: "Today",
       unread: false,
-      createdAt: now.toISOString()
+      createdAt: now
     },
     {
-      id: `${email}-3`,
+      id: `${email}-stock-seed`,
       type: "stock",
       title: "Back in stock alerts",
       message: "Products you follow can appear here when inventory is available again.",
       time: "Today",
       unread: false,
-      createdAt: now.toISOString()
+      createdAt: now
     }
   ];
+}
+
+function formatRelativeTime(dateString) {
+  const createdAt = new Date(dateString).getTime();
+  const now = Date.now();
+  const diffMs = now - createdAt;
+
+  const minutes = Math.floor(diffMs / 60000);
+  if (minutes < 1) return "Just now";
+  if (minutes < 60) return `${minutes} min ago`;
+
+  const hours = Math.floor(diffMs / 3600000);
+  if (hours < 24) return `${hours}h ago`;
+
+  const days = Math.floor(diffMs / 86400000);
+  if (days === 1) return "Yesterday";
+  if (days < 7) return `${days}d ago`;
+
+  return "Earlier";
+}
+
+function hydrateNotificationTimes(items) {
+  return items.map((item) => ({
+    ...item,
+    time: item?.createdAt ? formatRelativeTime(item.createdAt) : item?.time || "Just now"
+  }));
+}
+
+function createNotification({
+  email,
+  type,
+  title,
+  message,
+  unread = true
+}) {
+  const db = readJsonFile(NOTIFICATIONS_FILE);
+  const current = Array.isArray(db[email]) ? db[email] : [];
+
+  const item = {
+    id: `${email}-${Date.now()}`,
+    type,
+    title,
+    message,
+    time: "Just now",
+    unread,
+    createdAt: new Date().toISOString()
+  };
+
+  db[email] = [item, ...current];
+  writeJsonFile(NOTIFICATIONS_FILE, db);
+
+  return item;
+}
+
+async function sendExpoPush({ to, title, body, data = {} }) {
+  const expoRes = await fetch("https://exp.host/--/api/v2/push/send", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      to,
+      sound: "default",
+      title,
+      body,
+      data
+    })
+  });
+
+  const expoJson = await expoRes.json();
+
+  if (!expoRes.ok) {
+    throw new Error(expoJson?.errors?.[0]?.message || "Expo push send failed.");
+  }
+
+  return expoJson;
 }
 
 async function shopifyAdminRequest(query, variables = {}) {
@@ -382,7 +465,7 @@ app.get("/notifications", (req, res) => {
 
     return res.json({
       ok: true,
-      notifications: db[email]
+      notifications: hydrateNotificationTimes(db[email])
     });
   } catch (error) {
     return res.status(500).json({
@@ -447,6 +530,10 @@ app.post("/notifications/preferences", (req, res) => {
       orderEnabled: Boolean(req.body?.orderEnabled),
       stockEnabled: Boolean(req.body?.stockEnabled),
       priceEnabled: Boolean(req.body?.priceEnabled),
+      cartEnabled:
+        req.body?.cartEnabled === undefined
+          ? existing.cartEnabled
+          : Boolean(req.body?.cartEnabled),
       updatedAt: new Date().toISOString()
     };
 
@@ -518,23 +605,22 @@ app.post("/notifications/send-test", async (req, res) => {
       });
     }
 
-    const expoRes = await fetch("https://exp.host/--/api/v2/push/send", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        to: prefs.expoPushToken,
-        sound: "default",
-        title: "WeBuyOne",
-        body: "This is a test push notification.",
-        data: {
-          type: "test"
-        }
-      })
+    const expoJson = await sendExpoPush({
+      to: prefs.expoPushToken,
+      title: "WeBuyOne",
+      body: "This is a test push notification.",
+      data: {
+        type: "test"
+      }
     });
 
-    const expoJson = await expoRes.json();
+    createNotification({
+      email,
+      type: "promo",
+      title: "Test notification sent",
+      message: "Your push notifications are working correctly.",
+      unread: true
+    });
 
     return res.json({
       ok: true,
@@ -544,6 +630,168 @@ app.post("/notifications/send-test", async (req, res) => {
     return res.status(500).json({
       ok: false,
       error: error?.message || "Unable to send test push notification."
+    });
+  }
+});
+
+app.post("/cart/save", (req, res) => {
+  try {
+    const email = normalizeEmail(req.body?.email);
+    const items = Array.isArray(req.body?.items) ? req.body.items : [];
+
+    if (!email) {
+      return res.status(400).json({
+        ok: false,
+        error: "Email is required."
+      });
+    }
+
+    const cartsDb = readJsonFile(CARTS_FILE);
+
+    cartsDb[email] = {
+      email,
+      items,
+      updatedAt: new Date().toISOString()
+    };
+
+    writeJsonFile(CARTS_FILE, cartsDb);
+
+    return res.json({
+      ok: true
+    });
+  } catch (error) {
+    return res.status(500).json({
+      ok: false,
+      error: error?.message || "Unable to save cart."
+    });
+  }
+});
+
+app.post("/cart/clear", (req, res) => {
+  try {
+    const email = normalizeEmail(req.body?.email);
+
+    if (!email) {
+      return res.status(400).json({
+        ok: false,
+        error: "Email is required."
+      });
+    }
+
+    const cartsDb = readJsonFile(CARTS_FILE);
+    delete cartsDb[email];
+    writeJsonFile(CARTS_FILE, cartsDb);
+
+    return res.json({
+      ok: true
+    });
+  } catch (error) {
+    return res.status(500).json({
+      ok: false,
+      error: error?.message || "Unable to clear cart."
+    });
+  }
+});
+
+app.get("/cart", (req, res) => {
+  try {
+    const email = normalizeEmail(req.query?.email);
+
+    if (!email) {
+      return res.status(400).json({
+        ok: false,
+        error: "Email is required."
+      });
+    }
+
+    const cartsDb = readJsonFile(CARTS_FILE);
+    const cart = cartsDb[email] || { email, items: [], updatedAt: null };
+
+    return res.json({
+      ok: true,
+      cart
+    });
+  } catch (error) {
+    return res.status(500).json({
+      ok: false,
+      error: error?.message || "Unable to load cart."
+    });
+  }
+});
+
+app.post("/notifications/send-abandoned-cart", async (req, res) => {
+  try {
+    const email = normalizeEmail(req.body?.email);
+
+    if (!email) {
+      return res.status(400).json({
+        ok: false,
+        error: "Email is required."
+      });
+    }
+
+    const prefsDb = readJsonFile(PREFERENCES_FILE);
+    const cartsDb = readJsonFile(CARTS_FILE);
+
+    const prefs = prefsDb[email];
+    const cart = cartsDb[email];
+
+    if (!prefs?.expoPushToken) {
+      return res.status(400).json({
+        ok: false,
+        error: "No Expo push token found for this email."
+      });
+    }
+
+    if (!prefs.pushEnabled || !prefs.cartEnabled) {
+      return res.status(400).json({
+        ok: false,
+        error: "Cart reminder notifications are disabled for this user."
+      });
+    }
+
+    if (!cart || !Array.isArray(cart.items) || cart.items.length === 0) {
+      return res.status(400).json({
+        ok: false,
+        error: "No saved cart found for this user."
+      });
+    }
+
+    const firstItem = cart.items[0];
+    const itemCount = cart.items.length;
+
+    const title = "You left items in your cart";
+    const message =
+      itemCount === 1
+        ? `${firstItem?.title || "An item"} is waiting for you. Complete your order now.`
+        : `${itemCount} items are waiting in your cart. Complete your order before they sell out.`;
+
+    const expoJson = await sendExpoPush({
+      to: prefs.expoPushToken,
+      title,
+      body: message,
+      data: {
+        type: "cart",
+        screen: "Cart"
+      }
+    });
+
+    createNotification({
+      email,
+      type: "cart",
+      title,
+      message,
+      unread: true
+    });
+
+    return res.json({
+      ok: true,
+      expo: expoJson
+    });
+  } catch (error) {
+    return res.status(500).json({
+      ok: false,
+      error: error?.message || "Unable to send abandoned cart notification."
     });
   }
 });
